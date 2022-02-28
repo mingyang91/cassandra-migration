@@ -94,6 +94,7 @@ dependencies = [
  "cdrs",
  "cdrs-tokio",
  "cdrs-tokio-helpers-derive",
+ "chrono",
  "futures",
  "futures-core",
  "getopts",

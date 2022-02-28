@@ -20,6 +20,7 @@ use cdrs_tokio_helpers_derive::*;
 use cdrs_tokio::frame::{Frame, Serialize};
 use cdrs_tokio::query::QueryValues;
 use cdrs_tokio::query_values;
+use chrono::{DateTime, Duration, DurationRound, NaiveDateTime, Utc};
 use futures_core::stream::Stream;
 use futures::StreamExt;
 use itertools::Itertools;
@@ -41,6 +42,12 @@ struct Params {
     host: String,
     username: String,
     password: String
+}
+
+#[derive(Debug)]
+enum MigrateError {
+    ConvertError(String),
+    InsertError(String)
 }
 
 fn parse(input: &Vec<String>) -> core::result::Result<Option<Params>, ArgsError> {
@@ -101,21 +108,39 @@ async fn run(host: String, username: String, password: String) {
     let session = TcpSessionBuilder::new(RoundRobinLoadBalancingStrategy::new(), cluster_config).build();
 
     let entity_stream = query_entity(&session);
+
     tokio::pin!(entity_stream);
 
-    while let Some(e) = entity_stream.next().await {
-        println!("{:?}", e);
-    }
-
-    // let row = EntityChange {
-    //     entity_type: String::from("ApplicantStandardResume"),
-    //     tenant_id: String::from("boe-test"),
-    //     update_time_bucket: 1642540000000i64,
-    //     update_time: 1642545521123i64,
-    //     open_id: String::from("abc123")
-    // };
-    // insert_entity_change(&session, row).await;
-    //
+    entity_stream
+        .buffered(2000)
+        .map(|entity| {
+            get_time_bucket(entity.update_time)
+                .map(|time_bucket| {
+                    EntityChange {
+                        entity_type: entity.entity_type,
+                        tenant_id: entity.tenant_id,
+                        update_time_bucket: time_bucket,
+                        update_time: entity.update_time,
+                        open_id: entity.open_id,
+                    }
+                })
+        })
+        .for_each_concurrent(Some(64), |change_res| async {
+            let inserted = match change_res {
+                Ok(c) => {
+                    let res = insert_entity_change(&session, &c).await;
+                    println!("insert {}", &c.open_id);
+                    res
+                },
+                Err(e) => Err(e)
+            };
+            match inserted {
+                Ok(_) => {},
+                Err(reason) => println!("Failed: {:?}", reason)
+            }
+        })
+        .await;
+    println!("Done");
 }
 
 #[derive(Clone, Debug, IntoCdrsValue, TryFromRow, PartialEq)]
@@ -190,7 +215,7 @@ async fn insert_entity_change<
     T: CdrsTransport,
     CM: ConnectionManager<T>,
     LB: LoadBalancingStrategy<T, CM> + Send + Sync + 'static
->(session: &Session<T, CM, LB>, row: EntityChange) -> Frame {
+>(session: &Session<T, CM, LB>, row: &EntityChange) -> std::result::Result<Frame, MigrateError> {
     let cql = "INSERT INTO akka_projection.entity_change (\
         entity_type, \
         tenant_id, \
@@ -198,7 +223,20 @@ async fn insert_entity_change<
         update_time, \
         open_id) VALUES (?, ?, ?, ?, ?)";
 
-    session.query_with_values(cql, row.into_query_values())
+    session.query_with_values(cql, row.clone().into_query_values())
         .await
-        .expect("insert")
+        .map_err(|e| MigrateError::InsertError(format!("{:?}", e)))
+}
+
+fn get_time_bucket(time: i64) -> std::result::Result<i64, MigrateError> {
+    let dt = DateTime::<Utc>::from_utc(NaiveDateTime::from_timestamp(time / 1000, (time % 1000 * 1_000_000) as u32), Utc);
+    dt.duration_trunc(Duration::hours(1))
+        .map(|x| x.timestamp_millis())
+        .map_err(|e| MigrateError::ConvertError(e.to_string()))
+}
+
+#[test]
+fn test_get_time_bucket() {
+    let res = get_time_bucket(1642676614825);
+    println!("{}", res.unwrap());
 }
