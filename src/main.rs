@@ -299,12 +299,21 @@ fn query_entity<
         let mut pager = paged
             .query("select * from akka_projection.entity");
 
-        while let Ok(page) = &pager.next().await {
-            for row in page {
-                match Entity::try_from_row(row.clone()) {
-                    Ok(e) => yield e,
-                    Err(e) => println!("{:?}", e)
+        loop {
+            let res = &pager.next().await;
+            match res {
+                Err(e) => println!("{}", e.to_string()),
+                Ok(page) => {
+                    for row in page {
+                        match Entity::try_from_row(row.clone()) {
+                            Ok(e) => yield e,
+                            Err(e) => println!("{:?}", e)
+                        }
+                    }
                 }
+            }
+            if !pager.has_more() {
+                break;
             }
         }
     }
@@ -320,12 +329,21 @@ fn query_relation<
         let mut pager = paged
             .query("select * from akka_projection.relationship");
 
-        while let Ok(page) = &pager.next().await {
-            for row in page {
-                match Relationship::try_from_row(row.clone()) {
-                    Ok(e) => yield e,
-                    Err(e) => println!("{:?}", e)
+        loop {
+            let res = &pager.next().await;
+            match res {
+                Err(e) => println!("{}", e.to_string()),
+                Ok(page) => {
+                    for row in page {
+                        match Relationship::try_from_row(row.clone()) {
+                            Ok(e) => yield e,
+                            Err(e) => println!("{:?}", e)
+                        }
+                    }
                 }
+            }
+            if !pager.has_more() {
+                break;
             }
         }
     }
@@ -354,10 +372,15 @@ async fn insert_relation_direction<
     LB: LoadBalancingStrategy<T, CM> + Send + Sync + 'static
 >(session: &Session<T, CM, LB>, row: &RelationDirection) -> std::result::Result<Frame, MigrateError> {
     let cql = "INSERT INTO akka_projection.relation_direction (\
-        entity_type, \
-        tenant_id, \
-        update_time_bucket, \
-        update_time, \
+        relation_type, \
+        relation_tenant, \
+        direction, \
+        l_tenant_id, \
+        l_entity_type, \
+        l_open_id, \
+        r_tenant_id, \
+        r_entity_type, \
+        r_open_id,\
         open_id) VALUES (?, ?, ?, ?, ?)";
 
     session.query_with_values(cql, row.clone().into_query_values())
