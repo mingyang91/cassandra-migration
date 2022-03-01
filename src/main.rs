@@ -125,11 +125,12 @@ async fn run(host: String, username: String, password: String) {
                     }
                 })
         })
-        .for_each_concurrent(Some(64), |change_res| async {
+        .enumerate()
+        .for_each_concurrent(Some(64), |(index, change_res)| async {
             let inserted = match change_res {
                 Ok(c) => {
                     let res = insert_entity_change(&session, &c).await;
-                    println!("insert entity {} {}", &c.entity_type, &c.open_id);
+                    println!("insert {}th entity {} {}", index, &c.entity_type, &c.open_id);
                     res
                 },
                 Err(e) => Err(e)
@@ -176,10 +177,12 @@ async fn run(host: String, username: String, password: String) {
             };
             stream::iter(vec![row1, row2])
         })
-        .for_each_concurrent(Some(64), |row| async {
+        .enumerate()
+        .for_each_concurrent(Some(64), |(index, row)| async {
+            let idx = index;
             let r = row;
             let inserted = insert_relation_direction(&session, &r).await;
-            println!("insert relation {} {}", &r.relation_type, &r.open_id);
+            println!("insert {}th relation {} {}", idx, &r.relation_type, &r.open_id);
             match inserted {
                 Ok(_) => {},
                 Err(reason) => println!("Failed: {:?}", reason)
