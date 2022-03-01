@@ -106,11 +106,13 @@ async fn run(host: String, username: String, password: String) {
         .await
         .unwrap();
     let session = TcpSessionBuilder::new(RoundRobinLoadBalancingStrategy::new(), cluster_config).build();
+    let session_rc = Arc::new(session);
 
-    let entity_stream = query_entity(&session);
+    let entity_stream = query_entity(session_rc.clone());
 
     tokio::pin!(entity_stream);
 
+    let insert_session = &session_rc.clone();
     println!("Entity Start!");
     entity_stream
         .map(|entity| {
@@ -126,10 +128,10 @@ async fn run(host: String, username: String, password: String) {
                 })
         })
         .enumerate()
-        .for_each_concurrent(Some(64), |(index, change_res)| async {
+        .for_each_concurrent(Some(64), |(index, change_res)| async move {
             let inserted = match change_res {
                 Ok(c) => {
-                    let res = insert_entity_change(&session, &c).await;
+                    let res = insert_entity_change(insert_session, &c).await;
                     println!("insert {}th entity {} {}", index, &c.entity_type, &c.open_id);
                     res
                 },
@@ -143,7 +145,7 @@ async fn run(host: String, username: String, password: String) {
         .await;
     println!("Entity Done!");
 
-    let relation_stream = query_relation(&session);
+    let relation_stream = query_relation(session_rc.clone());
 
     tokio::pin!(relation_stream);
 
@@ -178,10 +180,10 @@ async fn run(host: String, username: String, password: String) {
             stream::iter(vec![row1, row2])
         })
         .enumerate()
-        .for_each_concurrent(Some(64), |(index, row)| async {
+        .for_each_concurrent(Some(64), |(index, row)| async move {
             let idx = index;
             let r = row;
-            let inserted = insert_relation_direction(&session, &r).await;
+            let inserted = insert_relation_direction(insert_session, &r).await;
             println!("insert {}th relation {} {}", idx, &r.relation_type, &r.open_id);
             match inserted {
                 Ok(_) => {},
@@ -291,7 +293,7 @@ fn query_entity<
     T: CdrsTransport,
     CM: ConnectionManager<T>,
     LB: LoadBalancingStrategy<T, CM> + Send + Sync + 'static
->(session: &Session<T, CM, LB>) -> impl Stream<Item = Entity> + '_ {
+>(session: Arc<Session<T, CM, LB>>) -> impl Stream<Item = Entity> + 'static {
     stream! {
         let mut paged = session.paged(2000);
         let mut pager = paged
@@ -312,7 +314,7 @@ fn query_relation<
     T: CdrsTransport,
     CM: ConnectionManager<T>,
     LB: LoadBalancingStrategy<T, CM> + Send + Sync + 'static
->(session: &Session<T, CM, LB>) -> impl Stream<Item = Relationship> + '_ {
+>(session: Arc<Session<T, CM, LB>>) -> impl Stream<Item = Relationship> + 'static {
     stream! {
         let mut paged = session.paged(2000);
         let mut pager = paged
@@ -333,7 +335,7 @@ async fn insert_entity_change<
     T: CdrsTransport,
     CM: ConnectionManager<T>,
     LB: LoadBalancingStrategy<T, CM> + Send + Sync + 'static
->(session: &Session<T, CM, LB>, row: &EntityChange) -> std::result::Result<Frame, MigrateError> {
+>(session: &Arc<Session<T, CM, LB>>, row: &EntityChange) -> std::result::Result<Frame, MigrateError> {
     let cql = "INSERT INTO akka_projection.entity_change (\
         entity_type, \
         tenant_id, \
