@@ -3,7 +3,6 @@ extern crate args;
 use getopts::Occur;
 use std::collections::HashMap;
 use std::env;
-use std::net::IpAddr;
 use std::sync::Arc;
 use args::{Args, ArgsError};
 use async_stream::stream;
@@ -24,6 +23,8 @@ use chrono::{DateTime, Duration, DurationRound, NaiveDateTime, Utc};
 use futures_core::stream::Stream;
 use futures::{stream, StreamExt};
 use itertools::Itertools;
+use uuid::Uuid;
+use uuid::v1::{Timestamp};
 
 const PROGRAM_DESC: &'static str = "Transmitter migration for Cassandra";
 const PROGRAM_NAME: &'static str = "transmitter-migration";
@@ -32,7 +33,8 @@ const PROGRAM_NAME: &'static str = "transmitter-migration";
 struct Params {
     host: String,
     username: String,
-    password: String
+    password: String,
+    concurrent: i32
 }
 
 #[derive(Debug)]
@@ -49,19 +51,25 @@ fn parse(input: &Vec<String>) -> core::result::Result<Option<Params>, ArgsError>
                 "host for cassandra",
                 "localhost:9042",
                 Occur::Req,
-                None);
+                Some(String::from("localhost:9042")));
     args.option("u",
                 "username",
                 "username for cassandra",
                 "cassandra",
                 Occur::Req,
-                None);
+                Some(String::from("cassandra")));
     args.option("p",
                 "password",
                 "password for cassandra",
                 "******",
                 Occur::Req,
-                Some(String::from("output.log")));
+                Some(String::from("cassandra")));
+    args.option("c",
+                "concurrent",
+                "concurrent for insert",
+                "128",
+                Occur::Optional,
+                Some(String::from("128")));
 
     args.parse(input)?;
 
@@ -74,21 +82,22 @@ fn parse(input: &Vec<String>) -> core::result::Result<Option<Params>, ArgsError>
     let host = args.value_of::<String>("host").expect("host must provide");
     let username = args.value_of::<String>("username").expect("username must provide");
     let password = args.value_of::<String>("password").expect("password must provide");
+    let concurrent = args.value_of::<i32>("concurrent").expect("concurrent must be a integer");
 
-    Ok(Some(Params { host, username ,password }))
+    Ok(Some(Params { host, username ,password, concurrent }))
 }
 
 #[tokio::main]
 async fn main() {
     let args = env::args().collect_vec();
     match parse(&args) {
-        Ok(Some(param)) => run(param.host, param.username, param.password).await,
+        Ok(Some(param)) => run(param.host, param.username, param.password, param.concurrent).await,
         Ok(None) => (),
         Err(e) => panic!("args error, {:?}", e)
     }
 }
 
-async fn run(host: String, username: String, password: String) {
+async fn run(host: String, username: String, password: String, concurrent: i32) {
 
     let cluster_config = NodeTcpConfigBuilder::new()
         .with_contact_point(host.into())
@@ -107,19 +116,10 @@ async fn run(host: String, username: String, password: String) {
     println!("Entity Start!");
     entity_stream
         .map(|entity| {
-            get_time_bucket(entity.update_time)
-                .map(|time_bucket| {
-                    EntityChange {
-                        entity_type: entity.entity_type,
-                        tenant_id: entity.tenant_id,
-                        update_time_bucket: time_bucket,
-                        update_time: entity.update_time,
-                        open_id: entity.open_id,
-                    }
-                })
+            EntityChange::from_entity(&entity)
         })
         .enumerate()
-        .for_each_concurrent(Some(64), |(index, change_res)| async move {
+        .for_each_concurrent(Some(concurrent), |(index, change_res)| async move {
             let inserted = match change_res {
                 Ok(c) => {
                     let res = insert_entity_change(insert_session, &c).await;
@@ -171,7 +171,7 @@ async fn run(host: String, username: String, password: String) {
             stream::iter(vec![row1, row2])
         })
         .enumerate()
-        .for_each_concurrent(Some(64), |(index, row)| async move {
+        .for_each_concurrent(Some(concurrent), |(index, row)| async move {
             let idx = index;
             let r = row;
             let inserted = insert_relation_direction(insert_session, &r).await;
@@ -215,11 +215,36 @@ struct EntityChange {
     entity_type: String,
     tenant_id: String,
     update_time_bucket: i64,
-    update_time: i64,
+    update_time: Uuid,
     open_id: String,
 }
 
+static NODE_ID: [u8; 6] = [1, 2, 3, 4, 5, 6];
+
 impl EntityChange {
+    fn from_entity(entity: &Entity) -> core::result::Result<EntityChange, MigrateError> {
+        let ts = Timestamp::from_rfc4122(
+            entity.update_time as u64 / 1000,
+            entity.update_time as u16 % 1000
+        );
+        let timeuuid_res = Uuid::new_v1(ts, &NODE_ID);
+        timeuuid_res
+            .map_err(|e| MigrateError::ConvertError(format!("{:?}", e)))
+            .and_then(move |time_uuid| {
+                get_time_bucket(entity.update_time)
+                    .map(move |time_bucket| (time_uuid, time_bucket))
+            })
+            .map(move |(time_uuid, time_bucket)| {
+                EntityChange {
+                    entity_type: entity.entity_type.clone(),
+                    tenant_id: entity.tenant_id.clone(),
+                    update_time_bucket: time_bucket as i64,
+                    update_time: time_uuid,
+                    open_id: entity.open_id.clone(),
+                }
+            })
+    }
+
     fn into_query_values(self) -> QueryValues {
         query_values!(
             "entity_type" => self.entity_type,
@@ -380,7 +405,7 @@ async fn insert_relation_direction<
 }
 
 fn get_time_bucket(time: i64) -> std::result::Result<i64, MigrateError> {
-    let dt = DateTime::<Utc>::from_utc(NaiveDateTime::from_timestamp(time / 1000, (time % 1000 * 1_000_000) as u32), Utc);
+    let dt = DateTime::<Utc>::from_utc(NaiveDateTime::from_timestamp(time as i64 / 1000, (time % 1000 * 1_000_000) as u32), Utc);
     dt.duration_trunc(Duration::hours(1))
         .map(|x| x.timestamp_millis())
         .map_err(|e| MigrateError::ConvertError(e.to_string()))
