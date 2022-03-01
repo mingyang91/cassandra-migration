@@ -23,8 +23,6 @@ use chrono::{DateTime, Duration, DurationRound, NaiveDateTime, Utc};
 use futures_core::stream::Stream;
 use futures::{stream, StreamExt};
 use itertools::Itertools;
-use uuid::Uuid;
-use uuid::v1::{Timestamp};
 
 const PROGRAM_DESC: &'static str = "Transmitter migration for Cassandra";
 const PROGRAM_NAME: &'static str = "transmitter-migration";
@@ -215,31 +213,19 @@ struct EntityChange {
     entity_type: String,
     tenant_id: String,
     update_time_bucket: i64,
-    update_time: Uuid,
+    update_time: i64,
     open_id: String,
 }
 
-static NODE_ID: [u8; 6] = [1, 2, 3, 4, 5, 6];
-
 impl EntityChange {
     fn from_entity(entity: &Entity) -> core::result::Result<EntityChange, MigrateError> {
-        let ts = Timestamp::from_rfc4122(
-            entity.update_time as u64 / 1000,
-            entity.update_time as u16 % 1000
-        );
-        let timeuuid_res = Uuid::new_v1(ts, &NODE_ID);
-        timeuuid_res
-            .map_err(|e| MigrateError::ConvertError(format!("{:?}", e)))
-            .and_then(move |time_uuid| {
-                get_time_bucket(entity.update_time)
-                    .map(move |time_bucket| (time_uuid, time_bucket))
-            })
-            .map(move |(time_uuid, time_bucket)| {
+        get_time_bucket(entity.update_time)
+            .map(move |time_bucket| {
                 EntityChange {
                     entity_type: entity.entity_type.clone(),
                     tenant_id: entity.tenant_id.clone(),
                     update_time_bucket: time_bucket as i64,
-                    update_time: time_uuid,
+                    update_time: entity.update_time,
                     open_id: entity.open_id.clone(),
                 }
             })
