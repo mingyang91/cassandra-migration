@@ -22,7 +22,7 @@ use cdrs_tokio::query::QueryValues;
 use cdrs_tokio::query_values;
 use chrono::{DateTime, Duration, DurationRound, NaiveDateTime, Utc};
 use futures_core::stream::Stream;
-use futures::StreamExt;
+use futures::{stream, StreamExt};
 use itertools::Itertools;
 
 #[derive(Clone, Debug, TryFromRow, PartialEq)]
@@ -111,8 +111,8 @@ async fn run(host: String, username: String, password: String) {
 
     tokio::pin!(entity_stream);
 
+    println!("Entity Start!");
     entity_stream
-        .buffered(2000)
         .map(|entity| {
             get_time_bucket(entity.update_time)
                 .map(|time_bucket| {
@@ -129,7 +129,7 @@ async fn run(host: String, username: String, password: String) {
             let inserted = match change_res {
                 Ok(c) => {
                     let res = insert_entity_change(&session, &c).await;
-                    println!("insert {}", &c.open_id);
+                    println!("insert entity {} {}", &c.entity_type, &c.open_id);
                     res
                 },
                 Err(e) => Err(e)
@@ -140,7 +140,52 @@ async fn run(host: String, username: String, password: String) {
             }
         })
         .await;
-    println!("Done");
+    println!("Entity Done!");
+
+    let relation_stream = query_relation(&session);
+
+    tokio::pin!(relation_stream);
+
+    println!("Relation Start!");
+    relation_stream
+        .flat_map(|relation| {
+            let r1 = relation.clone();
+            let row1 = RelationDirection {
+                relation_type: r1.entity_type,
+                relation_tenant: r1.tenant_id,
+                direction: String::from("->"),
+                l_tenant_id: r1.from_tenant,
+                l_entity_type: r1.from_type,
+                l_open_id: r1.from_open_id,
+                r_tenant_id: r1.to_tenant,
+                r_entity_type: r1.to_type,
+                r_open_id: r1.to_open_id,
+                open_id: r1.open_id
+            };
+            let row2 = RelationDirection {
+                relation_type: relation.entity_type,
+                relation_tenant: relation.tenant_id,
+                direction: String::from("<-"),
+                l_tenant_id: relation.to_tenant,
+                l_entity_type: relation.to_type,
+                l_open_id: relation.to_open_id,
+                r_tenant_id: relation.from_tenant,
+                r_entity_type: relation.from_type,
+                r_open_id: relation.from_open_id,
+                open_id: relation.open_id
+            };
+            stream::iter(vec![row1, row2])
+        })
+        .for_each_concurrent(Some(64), |row| async {
+            let r = row;
+            let inserted = insert_relation_direction(&session, &r).await;
+            println!("insert relation {} {}", &r.relation_type, &r.open_id);
+            match inserted {
+                Ok(_) => {},
+                Err(reason) => println!("Failed: {:?}", reason)
+            }
+        })
+        .await;
 }
 
 #[derive(Clone, Debug, IntoCdrsValue, TryFromRow, PartialEq)]
@@ -190,6 +235,55 @@ impl EntityChange {
     }
 }
 
+#[derive(Clone, Debug, IntoCdrsValue, TryFromRow, PartialEq)]
+struct Relationship {
+    entity_type: String,
+    tenant_id: String,
+    open_id: String,
+    both_type: String,
+    from_open_id: String,
+    from_tenant: String,
+    from_type: String,
+    stages: HashMap<String, Stage>,
+    to_open_id: String,
+    to_tenant: String,
+    to_type: String,
+    create_time: i64,
+    update_time: i64,
+}
+
+#[derive(Clone, Debug, IntoCdrsValue, TryFromRow, PartialEq)]
+struct RelationDirection {
+    relation_type: String,
+    relation_tenant: String,
+    direction: String,
+    l_tenant_id: String,
+    l_entity_type: String,
+    l_open_id: String,
+    r_tenant_id: String,
+    r_entity_type: String,
+    r_open_id: String,
+    open_id: String
+}
+
+impl RelationDirection {
+    fn into_query_values(self) -> QueryValues {
+        query_values!(
+            "relation_type" => self.relation_type,
+            "relation_tenant" => self.relation_tenant,
+            "direction" => self.direction,
+            "l_tenant_id" => self.l_tenant_id,
+            "l_entity_type" => self.l_entity_type,
+            "l_open_id" => self.l_open_id,
+            "r_tenant_id" => self.r_tenant_id,
+            "r_entity_type" => self.r_entity_type,
+            "r_open_id" => self.r_open_id,
+            "open_id" => self.open_id
+        )
+    }
+}
+
+
 fn query_entity<
     T: CdrsTransport,
     CM: ConnectionManager<T>,
@@ -211,12 +305,50 @@ fn query_entity<
     }
 }
 
+fn query_relation<
+    T: CdrsTransport,
+    CM: ConnectionManager<T>,
+    LB: LoadBalancingStrategy<T, CM> + Send + Sync + 'static
+>(session: &Session<T, CM, LB>) -> impl Stream<Item = Relationship> + '_ {
+    stream! {
+        let mut paged = session.paged(2000);
+        let mut pager = paged
+            .query("select * from akka_projection.relationship");
+
+        while let Ok(page) = &pager.next().await {
+            for row in page {
+                match Relationship::try_from_row(row.clone()) {
+                    Ok(e) => yield e,
+                    Err(e) => println!("{:?}", e)
+                }
+            }
+        }
+    }
+}
+
 async fn insert_entity_change<
     T: CdrsTransport,
     CM: ConnectionManager<T>,
     LB: LoadBalancingStrategy<T, CM> + Send + Sync + 'static
 >(session: &Session<T, CM, LB>, row: &EntityChange) -> std::result::Result<Frame, MigrateError> {
     let cql = "INSERT INTO akka_projection.entity_change (\
+        entity_type, \
+        tenant_id, \
+        update_time_bucket, \
+        update_time, \
+        open_id) VALUES (?, ?, ?, ?, ?)";
+
+    session.query_with_values(cql, row.clone().into_query_values())
+        .await
+        .map_err(|e| MigrateError::InsertError(format!("{:?}", e)))
+}
+
+async fn insert_relation_direction<
+    T: CdrsTransport,
+    CM: ConnectionManager<T>,
+    LB: LoadBalancingStrategy<T, CM> + Send + Sync + 'static
+>(session: &Session<T, CM, LB>, row: &RelationDirection) -> std::result::Result<Frame, MigrateError> {
+    let cql = "INSERT INTO akka_projection.relation_direction (\
         entity_type, \
         tenant_id, \
         update_time_bucket, \
