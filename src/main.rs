@@ -34,7 +34,7 @@ struct Params {
     host: String,
     username: String,
     password: String,
-    concurrent: i32
+    concurrent: usize
 }
 
 #[derive(Debug)]
@@ -82,7 +82,7 @@ fn parse(input: &Vec<String>) -> core::result::Result<Option<Params>, ArgsError>
     let host = args.value_of::<String>("host").expect("host must provide");
     let username = args.value_of::<String>("username").expect("username must provide");
     let password = args.value_of::<String>("password").expect("password must provide");
-    let concurrent = args.value_of::<i32>("concurrent").expect("concurrent must be a integer");
+    let concurrent = args.value_of::<usize>("concurrent").expect("concurrent must be a integer");
 
     Ok(Some(Params { host, username ,password, concurrent }))
 }
@@ -97,7 +97,7 @@ async fn main() {
     }
 }
 
-async fn run(host: String, username: String, password: String, concurrent: i32) {
+async fn run(host: String, username: String, password: String, concurrent: usize) {
 
     let cluster_config = NodeTcpConfigBuilder::new()
         .with_contact_point(host.into())
