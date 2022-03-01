@@ -293,7 +293,7 @@ fn query_entity<
     T: CdrsTransport,
     CM: ConnectionManager<T>,
     LB: LoadBalancingStrategy<T, CM> + Send + Sync + 'static
->(session: Arc<Session<T, CM, LB>>) -> impl Stream<Item = Entity> + 'static {
+>(session: Arc<Session<T, CM, LB>>) -> impl Stream<Item = Entity> {
     stream! {
         let mut paged = session.paged(2000);
         let mut pager = paged
@@ -314,7 +314,7 @@ fn query_relation<
     T: CdrsTransport,
     CM: ConnectionManager<T>,
     LB: LoadBalancingStrategy<T, CM> + Send + Sync + 'static
->(session: Arc<Session<T, CM, LB>>) -> impl Stream<Item = Relationship> + 'static {
+>(session: Arc<Session<T, CM, LB>>) -> impl Stream<Item = Relationship> {
     stream! {
         let mut paged = session.paged(2000);
         let mut pager = paged
