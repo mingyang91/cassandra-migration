@@ -25,15 +25,6 @@ use futures_core::stream::Stream;
 use futures::{stream, StreamExt};
 use itertools::Itertools;
 
-#[derive(Clone, Debug, TryFromRow, PartialEq)]
-struct RowStruct {
-    key: String,
-    bootstrapped: String,
-    broadcast_address: IpAddr,
-    broadcast_port: i32,
-    cluster_name: String
-}
-
 const PROGRAM_DESC: &'static str = "Transmitter migration for Cassandra";
 const PROGRAM_NAME: &'static str = "transmitter-migration";
 
@@ -107,12 +98,12 @@ async fn run(host: String, username: String, password: String) {
         .unwrap();
     let session = TcpSessionBuilder::new(RoundRobinLoadBalancingStrategy::new(), cluster_config).build();
     let session_rc = Arc::new(session);
+    let insert_session = &session_rc.clone();
 
     let entity_stream = query_entity(session_rc.clone());
 
     tokio::pin!(entity_stream);
 
-    let insert_session = &session_rc.clone();
     println!("Entity Start!");
     entity_stream
         .map(|entity| {
@@ -200,7 +191,7 @@ struct Entity {
     open_id: String,
     create_time: i64,
     update_time: i64,
-    stages: HashMap<String, Stage>
+    stages: Option<HashMap<String, Stage>>
 }
 
 #[derive(Debug, Clone, PartialEq, IntoCdrsValue, TryFromUdt)]
@@ -249,7 +240,7 @@ struct Relationship {
     from_open_id: String,
     from_tenant: String,
     from_type: String,
-    stages: HashMap<String, Stage>,
+    stages: Option<HashMap<String, Stage>>,
     to_open_id: String,
     to_tenant: String,
     to_type: String,
@@ -381,7 +372,7 @@ async fn insert_relation_direction<
         r_tenant_id, \
         r_entity_type, \
         r_open_id,\
-        open_id) VALUES (?, ?, ?, ?, ?)";
+        open_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
     session.query_with_values(cql, row.clone().into_query_values())
         .await
