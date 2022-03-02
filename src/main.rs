@@ -393,7 +393,7 @@ async fn insert_relation_direction<
 fn get_time_bucket(time: i64) -> std::result::Result<i64, MigrateError> {
     let dt = DateTime::<Utc>::from_utc(NaiveDateTime::from_timestamp(time as i64 / 1000, (time % 1000 * 1_000_000) as u32), Utc);
     dt.duration_trunc(Duration::hours(1))
-        .map(|x| x.timestamp_millis())
+        .map(|x| x.timestamp())
         .map_err(|e| MigrateError::ConvertError(e.to_string()))
 }
 
